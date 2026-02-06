@@ -1,57 +1,86 @@
+# This program was modified by VEEVEK AUCKLOO / N01314187
+
 import socket
 import argparse
+import struct
+
+SEQ_FORMAT = "!I"   
+SEQ_SIZE = 4
+CHUNK_SIZE = 4096
 
 def run_server(port, output_file):
-    # 1. Create a UDP socket
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    
-    # 2. Bind the socket to the port (0.0.0.0 means all interfaces)
-    server_address = ('', port)
-    print(f"[*] Server listening on port {port}")
-    print(f"[*] Server will save each received file as 'received_<ip>_<port>.jpg' based on sender.")
-    sock.bind(server_address)
+    sock.bind(("", port))
 
-    # 3. Keep listening for new transfers
+    print(f"[*] Server listening on port {port}")
+
     try:
         while True:
             f = None
+            expected_seq = 0
+            buffer = {}          
+            eof_seq = None      
             sender_filename = None
-            reception_started = False
+
+            print("==== Start of reception ====")
+
             while True:
-                data, addr = sock.recvfrom(4096)
-                # Protocol: If we receive an empty packet, it means "End of File"
-                if not data:
-                    print(f"[*] End of file signal received from {addr}. Closing.")
-                    break
+                packet, addr = sock.recvfrom(CHUNK_SIZE + SEQ_SIZE)
+
+                if len(packet) < SEQ_SIZE:
+                    continue
+
+                seq = struct.unpack(SEQ_FORMAT, packet[:SEQ_SIZE])[0]
+                data = packet[SEQ_SIZE:]
+
+                ack = struct.pack(SEQ_FORMAT, seq)
+                sock.sendto(ack, addr)
+
+                # Create output file on first valid packet
                 if f is None:
-                    print("==== Start of reception ====")
                     ip, sender_port = addr
                     sender_filename = f"received_{ip.replace('.', '_')}_{sender_port}.jpg"
-                    f = open(sender_filename, 'wb')
-                    print(f"[*] First packet received from {addr}. File opened for writing as '{sender_filename}'.")
-                # Write data to disk
-                f.write(data)
-                # print(f"Server received {len(data)} bytes from {addr}") # Optional: noisy
+                    f = open(sender_filename, "wb")
+                    print(f"[*] Writing to {sender_filename}")
+
+                if len(data) == 0:
+                    eof_seq = seq
+                else:
+                    if seq < expected_seq:
+                        continue
+
+                    if seq > expected_seq:
+                        if seq not in buffer:
+                            buffer[seq] = data
+                        continue
+
+                    if seq == expected_seq:
+                        f.write(data)
+                        expected_seq += 1
+
+                        while expected_seq in buffer:
+                            f.write(buffer.pop(expected_seq))
+                            expected_seq += 1
+
+                if eof_seq is not None and expected_seq == eof_seq:
+                    print(f"[*] Complete (EOF seq={eof_seq}). Closing.")
+                    break
+
             if f:
                 f.close()
+
             print("==== End of reception ====")
+
     except KeyboardInterrupt:
         print("\n[!] Server stopped manually.")
-    except Exception as e:
-        print(f"[!] Error: {e}")
     finally:
         sock.close()
         print("[*] Server socket closed.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Naive UDP File Receiver")
+    parser = argparse.ArgumentParser(description="Reliable UDP File Receiver (Reordering + Loss)")
     parser.add_argument("--port", type=int, default=12001, help="Port to listen on")
-    parser.add_argument("--output", type=str, default="received_file.jpg", help="File path to save data")
+    parser.add_argument("--output", type=str, default="received_file.jpg", help="(Not used; kept for compatibility)")
     args = parser.parse_args()
 
-    try:
-        run_server(args.port, args.output)
-    except KeyboardInterrupt:
-        print("\n[!] Server stopped manually.")
-    except Exception as e:
-        print(f"[!] Error: {e}")
+    run_server(args.port, args.output)
